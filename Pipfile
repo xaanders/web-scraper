@@ -8,6 +8,8 @@ mysql-connector-python = "*"
 boto3 = "*"
 requests = "*"
 beautifulsoup4 = "*"
+playwright = "*"
+asyncio = "*"
 
 [dev-packages]
 
