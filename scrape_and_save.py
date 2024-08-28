@@ -6,11 +6,12 @@ from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
 import asyncio
 import re
+import os
 
 # Create a global connection object
 connection = None
 counter = 0
-no_access_items = ["cloudflare", "wordpress"]
+no_access_items = ["cloudflare", "Request Rejected"]
 
 
 def get_db_connection():
@@ -33,7 +34,7 @@ def get_items_to_scrape():
     cursor = connection.cursor(dictionary=True)
     query = """
     SELECT company_id, user_id, email, url, status, last_scrape_date, next_scrape_date, 
-           initial_number, current_number, new_items, keywords, status
+           initial_number, current_number, new_items, keywords, status, company_name
     FROM track_company WHERE status = 1
     LIMIT 100;
     """
@@ -48,7 +49,7 @@ def update_item(item):
     cursor = connection.cursor()
     query = """
     UPDATE track_company
-    SET current_number = %s, new_items = %s, next_scrape_date = %s, last_scrape_date = %s, status = %s, company_name = %s, matched_keywords = %s
+    SET current_number = %s, new_items = %s, next_scrape_date = %s, last_scrape_date = %s, status = %s, matched_keywords = %s
     WHERE company_id = %s;
     """
     cursor.execute(
@@ -59,7 +60,6 @@ def update_item(item):
             item["next_scrape_date"],
             item["last_scrape_date"],
             item["status"],
-            item["company_name"],
             item["matched_keywords"],
             item["company_id"],
         ),
@@ -87,18 +87,40 @@ def store_user_items_for_notification(user_items):
 async def scrape_and_find_keywords(page, url, keywords):
     matching_keywords = []
     try:
-        # Navigate to the URL
-        await page.goto(url)
+        # Set User-Agent and headers
+        await page.set_extra_http_headers(
+            {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9",
+            }
+        )
 
-        # Wait for network idle state to ensure page has loaded completely
-        await page.wait_for_load_state("networkidle")
+        # Load cookies from previous session (optional)
+        # try:
+        #     with open("cookies.json", "r") as file:
+        #         cookies = json.load(file)
+        #     await page.context.add_cookies(cookies)
+        # except FileNotFoundError:
+        #     pass  # No cookies to load
+
+        # Navigate to the URL
+        await page.goto(url, wait_until="domcontentloaded")
+
+        # Wait for Cloudflare challenge to complete
+        await page.wait_for_timeout(2000)  # Adjust timing as needed
+
+        # Save cookies to file for reuse in next sessions
+        cookies = await page.context.cookies()
+        with open("cookies.json", "w") as file:
+            json.dump(cookies, file)
 
         # Get the full page text content
         text_content = await page.content()
 
         # Optional: Save the content to a file for debugging purposes
         safe_filename = url.split("//")[-1].split("/")[0].replace(".", "_") + ".txt"
-        with open(safe_filename, "w", encoding="utf-8") as f:
+        with open("./scraped_pages/" + safe_filename, "w", encoding="utf-8") as f:
             f.write(text_content)
 
         for na_item in no_access_items:
@@ -107,12 +129,9 @@ async def scrape_and_find_keywords(page, url, keywords):
 
         # Loop through the keywords and find matches
         for keyword in keywords:
-            # Escape special characters in keyword for regex
             escaped_keyword = re.escape(keyword.strip())
-            # Use regex to find all matches of the keyword in the text content
             matches = re.findall(escaped_keyword, text_content)
             if matches:
-                # Append the keyword to the matching_keywords list for each match found
                 matching_keywords.extend([keyword] * len(matches))
 
     except Exception as e:
@@ -126,7 +145,7 @@ async def scrape_website_playwright(items):
     try:
         async with async_playwright() as p:
             # Launch a single browser instance
-            browser = await p.chromium.launch(headless=True)
+            browser = await p.chromium.launch(headless=False)
             tasks = []
 
             # Create a page per URL and scrape concurrently
@@ -152,9 +171,6 @@ async def scrape_website_playwright(items):
                 else:
                     item["current_number"] = len(result)
                     item["matched_keywords"] = ",".join(result)
-                    item["company_name"] = re.sub(
-                        r"[^a-zA-Z]", "", item["url"].split(".")[1]
-                    )
                     new_items.append(item)
                     for na_item in no_access_items:
                         if na_item in result:
